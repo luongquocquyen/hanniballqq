@@ -1,0 +1,106 @@
+from binance.client import Client
+import xlwings as xw
+import time
+import ccxt
+
+def get_binance_client(api_key, api_secret):
+    return Client(api_key=api_key, api_secret=api_secret, testnet=False)
+
+def get_binance_usdm_client(api_key, api_secret):
+    return ccxt.binanceusdm({
+        'apiKey': api_key,
+        'secret': api_secret,
+        'testnet': False
+    })
+
+def handle_binance_errors(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            print(e)
+            pass
+
+    return wrapper
+
+@handle_binance_errors
+def fetch_binance_account_balance(client):
+    return client.futures_account_balance()
+
+@handle_binance_errors
+def fetch_binance_account(client):
+    return client.futures_account()
+
+# Main program
+wb = xw.books.active
+sheet = wb.sheets['Destination']
+
+api_key = sheet.range((2, 26)).value
+api_secret = sheet.range((3, 26)).value
+
+binance_client = get_binance_client(api_key, api_secret)
+binance_usdm_client = get_binance_usdm_client(api_key, api_secret)
+
+account = None
+peakROE = sheet.range((1, 28)).value
+cbrROE = sheet.range((2, 28)).value
+track_roe = False
+
+while True:
+    balance = fetch_binance_account_balance(binance_client)
+    account = fetch_binance_account(binance_client)
+
+    if account is not None:
+        usdt_balance = 0
+
+        for asset in account['assets']:
+            if asset['asset'] == 'USDT':
+                Equity = float(asset['walletBalance'])
+                initial_margin = float(asset['initialMargin'])
+                unrealized_profit = float(asset['unrealizedProfit'])
+                pnl = float(asset['crossUnPnl'])
+                roe = unrealized_profit / Equity
+                roi = unrealized_profit / initial_margin * 100
+
+                print('PNL: ' + str(pnl) + ' USDT')
+                print('ROE: ' + str(roe) + ' %')
+                print('ROI: ' + str(roi) + ' %')
+                print('Equity: ' + str(Equity) + ' %')
+                print('_______________________')
+
+                if roe >= peakROE:
+                    peakROE = roe
+                    track_roe = True
+
+                sheet.range((4, 28)).value = str(pnl) + ' USDT'
+                sheet.range((5, 28)).value = str(roe) + ' %'
+                sheet.range((6, 28)).value = str(peakROE) + ' %'
+                sheet.range((8, 28)).value = str(Equity) + ' USDT'
+
+                # Check if roe is greater than or equal to SL ROE
+                if track_roe and roe <= (peakROE - cbrROE):
+                    i = 2
+                    while True:
+                        try:
+                            if not sheet.range((i, 24)).value:
+                                print("_____________Hoàn thành_____________")
+                                break
+
+                            symbol = sheet.range((i, 24)).value
+                            binance_usdm_client.cancel_all_orders(symbol)
+
+                            sheet.range((i, 25)).value = 'OK'
+                        except Exception as e:
+                            print(f"Error at row {i}: {e}")
+                            sheet.range((i, 25)).value = str(e)
+                        finally:
+                            i += 1
+                    # Reset track_roe to False after executing the action
+                    track_roe = False
+                    sheet.range((7, 28)).value = 'DONE'
+
+    time.sleep(sheet.range((3, 28)).value)
+
+# Lưu lại workbook
+#wb.save('C:\\Users\\luong\\Downloads\\PUSH-ROE-Result.xlsm')
+print("DONE")
