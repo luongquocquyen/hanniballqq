@@ -1,0 +1,85 @@
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from tkinter import messagebox
+
+# Hàm giả lập để lấy danh sách các vị thế mở trên Binance Futures
+def get_open_positions():
+    return [
+        {"symbol": "BTCUSDT", "pnl": 25.5},
+        {"symbol": "ETHUSDT", "pnl": -10.2},
+        {"symbol": "BNBUSDT", "pnl": 12.7},
+    ]
+
+# Hàm xử lý sự kiện khi nhấn nút "SL ROE"
+def open_sl_roe_window():
+    # Tạo cửa sổ mới
+    sl_roe_window = ttk.Toplevel()
+    sl_roe_window.geometry("500x400")
+    sl_roe_window.title("Danh sách vị thế mở")
+
+    # Khung chứa bảng
+    frame = ttk.Frame(sl_roe_window)
+    frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # Tạo Treeview
+    tree = ttk.Treeview(frame, columns=("Symbol", "PnL"), show="headings", height=15)
+    tree.column("#0", width=50, anchor="center")  # Cột checkbox
+    tree.column("Symbol", anchor="center", width=200)
+    tree.column("PnL", anchor="center", width=100)
+
+    tree.heading("#0", text="Chọn")
+    tree.heading("Symbol", text="Cặp giao dịch")
+    tree.heading("PnL", text="Lãi/Lỗ")
+    tree.pack(fill="both", expand=True)
+
+    # Thêm dữ liệu vào Treeview
+    positions = get_open_positions()
+    checkbox_vars = {}  # Lưu trữ trạng thái của các checkbox
+
+    for i, pos in enumerate(positions):
+        var = ttk.BooleanVar(value=False)  # Mỗi checkbox là một biến riêng
+        checkbox_vars[i] = var
+
+        # Thêm dữ liệu vào Treeview
+        tree.insert("", "end", iid=i, values=(pos["symbol"], f"{pos['pnl']:.2f} USDT"))
+
+    # Hàm để vẽ checkbox trên Treeview tại đúng vị trí
+    def draw_checkboxes():
+        for i in range(len(positions)):
+            bbox = tree.bbox(i, "#0")  # Lấy vị trí của cột #0 (checkbox)
+            if bbox:
+                # Tạo checkbox tại vị trí tương ứng
+                var = checkbox_vars[i]
+                checkbox = ttk.Checkbutton(tree, variable=var)
+                # Đặt checkbox tại vị trí tương ứng
+                checkbox.place(x=bbox[0] + 10, y=bbox[1] + 5)  # Căn chỉnh checkbox
+
+    # Vẽ các checkbox sau khi Treeview được tạo
+    tree.after(100, draw_checkboxes)
+
+    # Hàm lấy danh sách các symbol đã chọn
+    def get_selected_symbols():
+        selected_symbols = [
+            positions[i]["symbol"] for i, var in checkbox_vars.items() if var.get()
+        ]
+        messagebox.showinfo("Danh sách đã chọn", "\n".join(selected_symbols))
+
+    # Nút Lấy danh sách đã chọn
+    get_selected_button = ttk.Button(sl_roe_window, text="Lấy danh sách đã chọn", command=get_selected_symbols, bootstyle="success")
+    get_selected_button.pack(pady=10)
+
+    # Nút Đóng
+    close_button = ttk.Button(sl_roe_window, text="Đóng", command=sl_roe_window.destroy, bootstyle="danger")
+    close_button.pack(pady=10)
+
+# Tạo cửa sổ chính
+root = ttk.Window(themename="litera")  # Sử dụng chủ đề của ttkbootstrap
+root.geometry("400x200")
+root.title("PUSH BINANCE by meLinh3con")
+
+# Nút SL ROE
+sl_roe_button = ttk.Button(root, text="SL ROE", command=open_sl_roe_window, bootstyle="primary")
+sl_roe_button.pack(pady=20)
+
+# Chạy GUI
+root.mainloop()
