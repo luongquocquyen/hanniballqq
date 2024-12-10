@@ -1,0 +1,258 @@
+import sys
+import json
+import requests
+import time
+import hmac
+import hashlib
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QPushButton, QWidget
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from websocket import create_connection
+import threading
+from PyQt5.QtCore import Qt
+
+
+# Binance API keys
+API_KEY = ""
+API_SECRET = ""
+
+# Base URLs
+REST_BASE_URL = "https://fapi.binance.com"
+WS_BASE_URL = "wss://fstream.binance.com/ws/"
+
+# Create signed request for Binance REST API
+def create_signed_request(endpoint, params):
+    timestamp = int(time.time() * 1000)
+    params["timestamp"] = timestamp
+    query_string = "&".join([f"{key}={params[key]}" for key in params])
+    signature = hmac.new(
+        API_SECRET.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    headers = {"X-MBX-APIKEY": API_KEY}
+    url = f"{REST_BASE_URL}{endpoint}?{query_string}&signature={signature}"
+    return url, headers
+
+
+# WebSocket thread to fetch real-time price updates
+class WebSocketThread(QThread):
+    price_update_signal = pyqtSignal(dict)
+
+    def run(self):
+        ws = create_connection(WS_BASE_URL + "!ticker@arr")
+        print("WebSocket connected.")
+        while True:
+            try:
+                data = json.loads(ws.recv())
+                prices = {item["s"]: float(item["c"]) for item in data}
+                self.price_update_signal.emit(prices)
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+                time.sleep(1)  # Retry after a short delay
+
+
+# Worker thread to fetch account positions
+class DataFetchThread(QThread):
+    positions_signal = pyqtSignal(list)
+
+    def run(self):
+        while True:
+            positions = self.fetch_positions()
+            self.positions_signal.emit(positions)
+            time.sleep(5)  # Refresh every 5 seconds
+
+    def fetch_positions(self):
+        endpoint = "/fapi/v2/positionRisk"
+        params = {}
+        url, headers = create_signed_request(endpoint, params)
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Failed to fetch positions: {response.text}")
+            return []
+
+
+# GUI Application
+class BinanceFuturesGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Binance Futures Monitor")
+        self.setGeometry(100, 100, 1200, 600)
+
+        # Main widget and layout
+        self.main_widget = QWidget()
+        self.layout = QVBoxLayout(self.main_widget)
+
+        # Table to display data
+        self.table = QTableWidget()
+        self.layout.addWidget(self.table)
+
+        # Refresh button
+        self.refresh_button = QPushButton("Refresh Data")
+        self.refresh_button.clicked.connect(self.update_table)
+        self.layout.addWidget(self.refresh_button)
+
+        self.setCentralWidget(self.main_widget)
+
+        # Timer for auto-refresh
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_table)
+        self.timer.start(5000)  # Auto-refresh every 5 seconds
+
+        # Initial table setup
+        self.setup_table()
+
+        # Cache for tracking Peak PNL
+        self.peak_pnl = {}
+
+        # Cache for user-defined CBR values
+        self.cbr_values = {}
+
+        # Last Price cache
+        self.last_prices = {}
+
+        # Setup table
+        self.setup_table()
+
+        # Threads
+        self.data_thread = DataFetchThread()
+        self.data_thread.positions_signal.connect(self.update_positions)
+
+        self.ws_thread = WebSocketThread()
+        self.ws_thread.price_update_signal.connect(self.update_prices)
+
+        # Start threads
+        self.data_thread.start()
+        self.ws_thread.start()
+
+    def setup_table(self):
+        """Setup table structure."""
+        headers = ["Symbol", "Last Price", "Entry Long", "Size Long", "Entry Short", 
+                   "Size Short", "Lev", "Liquid", "UnPNL", "Peak PNL", "CBR (%)"]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def update_prices(self, prices):
+        """Update last prices."""
+        self.last_prices.update(prices)
+        self.update_table()
+
+    def update_positions(self, positions):
+        """Update account positions."""
+        self.positions = positions
+        self.update_table()
+
+    def process_price_update(self, data):
+        """Update last price from WebSocket data."""
+        for ticker in data:
+            symbol = ticker["s"]
+            price = float(ticker["c"])
+            self.last_prices[symbol] = price
+
+    def update_table(self):
+        """Refresh the table with updated data."""
+        # Filter open positions
+        open_positions = [pos for pos in getattr(self, "positions", []) if float(pos["positionAmt"]) != 0]
+
+        # Combine positions for each symbol
+        combined_positions = {}
+        for pos in open_positions:
+            symbol = pos["symbol"]
+            entry_price = float(pos["entryPrice"])
+            position_amt = float(pos["positionAmt"])
+            leverage = int(pos["leverage"])
+            liquidation_price = float(pos["liquidationPrice"]) if pos["liquidationPrice"] != "null" else 0
+            unpnl = float(pos["unRealizedProfit"])  # Giá trị unPNL từ API
+
+            # Khởi tạo giá trị ban đầu
+            if symbol not in combined_positions:
+                combined_positions[symbol] = {
+                    "entry_long": "-", "size_long": "-", 
+                    "entry_short": "-", "size_short": "-", 
+                    "leverage": 0, "liquidation": 0, "unpnl": 0,
+                    "peak_pnl": -999999  # Khởi tạo cột Peak PNL với giá trị -999999
+                }
+
+            # Cập nhật thông tin cho bảng
+            if position_amt > 0:
+                combined_positions[symbol]["entry_long"] = entry_price
+                combined_positions[symbol]["size_long"] = position_amt
+            elif position_amt < 0:
+                combined_positions[symbol]["entry_short"] = entry_price
+                combined_positions[symbol]["size_short"] = abs(position_amt)
+
+            combined_positions[symbol]["leverage"] = leverage
+            combined_positions[symbol]["liquidation"] = liquidation_price
+
+            # Cập nhật tổng unPNL cho cả Long và Short
+            combined_positions[symbol]["unpnl"] += round(unpnl, 2)  # Cập nhật tổng unPNL từ mỗi vị thế
+
+            # Tính total pnl
+            total_pnl = combined_positions[symbol]["unpnl"]
+
+            # Cập nhật Peak PNL sử dụng total_pnl
+            combined_positions[symbol]["peak_pnl"] = max(combined_positions[symbol]["peak_pnl"], total_pnl)
+
+        # Update GUI
+        self.table.setRowCount(len(combined_positions))
+        for row, (symbol, data) in enumerate(combined_positions.items()):
+            last_price = self.last_prices.get(symbol, "-")
+            peak_pnl = data["peak_pnl"]  # Lấy giá trị Peak PNL từ combined_positions
+            cbr_value = self.cbr_values.get(symbol, "")
+
+            # Check for CBR-triggered closing
+            if cbr_value and float(data["unpnl"]) < peak_pnl * (1 - float(cbr_value) / 100):
+                self.close_positions(symbol)
+
+            data_row = [
+                symbol,
+                last_price,
+                data["entry_long"], data["size_long"],
+                data["entry_short"], data["size_short"],
+                data["leverage"], data["liquidation"],
+                round(data["unpnl"], 2),  # Hiển thị tổng unPNL
+                round(peak_pnl, 2)  # Cột Peak PNL
+            ]
+            for col, value in enumerate(data_row):
+                self.table.setItem(row, col, QTableWidgetItem(str(value)))
+
+            # Thêm ô nhập liệu cho CBR
+            cbr_input = QTableWidgetItem(str(cbr_value))
+            self.table.setItem(row, 10, cbr_input)
+
+            # Cho phép người dùng chỉnh sửa giá trị CBR
+            cbr_input.setFlags(cbr_input.flags() | Qt.ItemIsEditable)
+
+            # Kết nối sự kiện thay đổi trong giá trị CBR
+            self.table.itemChanged.connect(lambda item, symbol=symbol: self.update_cbr_value(symbol, item))
+
+    def update_cbr_value(self, symbol, item):
+        """Update CBR value based on user input."""
+        if item.column() == 10:  # CBR column
+            try:
+                value = float(item.text())
+                self.cbr_values[symbol] = value
+            except ValueError:
+                self.cbr_values[symbol] = ""  # Clear if invalid input
+
+    def close_positions(self, symbol):
+        """Close positions and cancel orders for a given symbol."""
+        print(f"Closing positions and canceling orders for {symbol}")
+        # Implement the Binance API logic to close the position and cancel orders
+
+    def closeEvent(self, event):
+        """Stop threads when closing the application."""
+        self.data_thread.terminate()
+        self.ws_thread.terminate()
+        event.accept()
+
+
+# Main function
+def main():
+    app = QApplication(sys.argv)
+    window = BinanceFuturesGUI()
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
